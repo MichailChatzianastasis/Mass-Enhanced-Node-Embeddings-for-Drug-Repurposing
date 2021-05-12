@@ -12,6 +12,7 @@ For a detailed description of the multiscale interactome and its applications, p
 ## Data
 All data is available at http://snap.stanford.edu/multiscale-interactome/data/data.tar.gz. To download the data, please run the following code in the same directory this project is cloned to. This should result in a data/ folder populated with the relevant data.
 ```
+
 wget http://snap.stanford.edu/multiscale-interactome/data/data.tar.gz
 tar -xvf data.tar.gz
 ```
