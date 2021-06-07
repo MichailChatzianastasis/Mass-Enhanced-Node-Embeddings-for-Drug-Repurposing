@@ -6,6 +6,10 @@ from diff_prof.diffusion_profiles import DiffusionProfiles
 import multiprocessing
 import pickle
 import networkx as nx
+from models import MLP
+from models import MLP2
+from models import MLPSet
+from models import *
 
 from tests.msi import test_msi
 from tests.diff_prof import test_diffusion_profiles
@@ -14,7 +18,8 @@ from scipy.spatial import distance
 import pandas as pd
 from operator import itemgetter
 import pickle
- 
+import torch 
+
 def construct_disease_drug_tsv():
     '''
     Construct a tsv with disease-drug pairs. ( We currently have drug-disease pairs)
@@ -42,6 +47,14 @@ def construct_disease_drug_tsv():
     with open('/data/multiscale-interactome/data/drug_codes_dict.pickle', 'wb') as handle:
         pickle.dump(drug_list_codes, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
+    #construct list of diseases
+    disease_list_codes = {}
+    for key in dict_to_save:
+        disease_list_codes[key]=1
+    with open('/data/multiscale-interactome/data/disease_codes_dict.pickle', 'wb') as handle:
+        pickle.dump(disease_list_codes, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+    #construct list of diseases
 
     #drug to protein dict
     drug_to_protein_tsv = pd.read_csv("/data/multiscale-interactome/data/1_drug_to_protein.tsv",sep='\t', header=0)
@@ -65,109 +78,184 @@ def construct_disease_drug_tsv():
     with open('/data/multiscale-interactome/data/disease_to_protein_dict.pickle', 'wb') as handle:
         pickle.dump(dict_to_save, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
-def evaluate_model(model="diffusion_profiles",metric="Correlation distance"):
-        ''' 
+def evaluate_model(model="diffusion_profiles",mlp=False,mlp_model_name=None,metric="Correlation distance",node_embeddings_path=None,EMB_DIM=256,indices=None):
+    ''' 
         For each disease, the model produces a ranked list of drugs. We identify the drugs approved to treat the disease (drug-disease labels).
         For each disease, we then compute the model’s AUROC, Average Precision,and Recall@50 values based on the ranked list of drugs. 
         We report the model’s performance across diseases by reporting the median of the AUROC, the mean of the Average Precision, and the mean of the Recall@50 values across diseases.
         Five-cross validation splitting.
-        '''
+    '''
+    path_to_graph = "./results/graph.pkl"
+    path_node2idx = "./results/node2idx.pkl"
 
-        # construct msi 
-        msi = MSI()
-        msi.load()
-        average_precision = []
-        recall50 = []
+    with open(path_to_graph, 'rb') as handle:
+        graph = pickle.load(handle)
 
-        #load disease drug dict
-        with open('/data/multiscale-interactome/data/disease_to_drug_dict.pickle', 'rb') as handle:
-            disease_to_drug_dict = pickle.load(handle)
+    with open(path_node2idx, 'rb') as handle:
+        node2idx = pickle.load(handle)
 
-        #load drug to protein dict
-        with open('/data/multiscale-interactome/data/drug_to_protein_dict.pickle', 'rb') as handle:
-            drug_to_protein_dict = pickle.load(handle)
+    # construct msi 
+    msi = MSI()
+    msi.load()
+    average_precision = []
+    recall50 = []
 
-        #load disease to protein dict
-        with open('/data/multiscale-interactome/data/disease_to_protein_dict.pickle', 'rb') as handle:
-            disease_to_protein_dict = pickle.load(handle)
-        #load drug list
-        with open('/data/multiscale-interactome/data/drug_codes_dict.pickle', 'rb') as handle:
-            drug_codes_dict = pickle.load(handle)
-        
-        display_counter = 0
+    #load disease drug dict
+    with open('./data/disease_to_drug_dict.pickle', 'rb') as handle:
+        disease_to_drug_dict = pickle.load(handle)
 
-        if(model=="diffusion_profiles"):
-            print("Loading diffusion profiles..")
-            #load best diffusion profile
-            #dp_saved = DiffusionProfiles(alpha = None, max_iter = None, tol = None, weights = None, num_cores = None, save_load_file_path = "results/")
-            #msi.load_saved_node_idx_mapping_and_nodelist(dp_saved.save_load_file_path)
-            #dp_saved.load_diffusion_profiles(msi.drugs_in_graph + msi.indications_in_graph)
+    #load drug to protein dict
+    with open('./data/drug_to_protein_dict.pickle', 'rb') as handle:
+        drug_to_protein_dict = pickle.load(handle)
 
-            #compute diffusion profiles with above parameters
-            #dp_saved = DiffusionProfiles(alpha = 0.5595436247434408, max_iter = 1000, tol = 1e-06, weights = {'down_biological_function': 7.4863053901688685, 
-            #                'indication': 1.541889556309463, 'biological_function': 4.583155399238509, 'up_biological_function': 3.09685000906964, 'protein': 1.396695660380823, 
-            #                'drug': 3.2071696595616364}, num_cores = int(multiprocessing.cpu_count()/2) - 4, save_load_file_path = "/data/multiscale-interactome/results/")
-            #dp_saved.calculate_diffusion_profiles(msi)
+    #load disease to protein dict
+    with open('./data/disease_to_protein_dict.pickle', 'rb') as handle:
+        disease_to_protein_dict = pickle.load(handle)
+    #load drug list
+    with open('./data/drug_codes_dict.pickle', 'rb') as handle:
+        drug_codes_dict = pickle.load(handle)
+    
+    if(mlp==True):
+        mlp_model = eval(mlp_model_name)(EMB_DIM)
+        mlp_model.load_state_dict(torch.load("./data/MLP_model_"+str(EMB_DIM)))
+        mlp_model.eval()
+    
+    display_counter = 0
+    if(indices is not None):
+        train_indices,test_indices = indices
 
-            dp_saved = DiffusionProfiles(alpha = None, max_iter = None, tol = None, weights = None, num_cores = None, save_load_file_path = "/data/multiscale-interactome/data/10_top_msi/")
-            msi.load_saved_node_idx_mapping_and_nodelist(dp_saved.save_load_file_path)
-            dp_saved.load_diffusion_profiles(msi.drugs_in_graph + msi.indications_in_graph)
-            print("Diffusion profiles loaded.")
+    if(model=="diffusion_profiles"):
+        print("Loading diffusion profiles..")
+        #load best diffusion profile
+        #dp_saved = DiffusionProfiles(alpha = None, max_iter = None, tol = None, weights = None, num_cores = None, save_load_file_path = "results/")
+        #msi.load_saved_node_idx_mapping_and_nodelist(dp_saved.save_load_file_path)
+        #dp_saved.load_diffusion_profiles(msi.drugs_in_graph + msi.indications_in_graph)
 
-            # for each disease and drug compute the diffusion profiles r. Then for each disease, rank the drugs based on the distance of the diffusion profile r_disease and r_drug.
-            for key, value in disease_to_drug_dict.items():  #key is disease code, value is a list of ["disease_name","drug_code","drug_name"] cure the disease. 
-                #diffusion profile of the disease
-                if(display_counter % 10 == 0):
-                    print("index",display_counter)
-                display_counter+=1
-                disease_r = dp_saved.drug_or_indication2diffusion_profile[key]
+        #compute diffusion profiles with above parameters
+        #dp_saved = DiffusionProfiles(alpha = 0.5595436247434408, max_iter = 1000, tol = 1e-06, weights = {'down_biological_function': 7.4863053901688685, 
+        #                'indication': 1.541889556309463, 'biological_function': 4.583155399238509, 'up_biological_function': 3.09685000906964, 'protein': 1.396695660380823, 
+        #                'drug': 3.2071696595616364}, num_cores = int(multiprocessing.cpu_count()/2) - 4, save_load_file_path = "/data/multiscale-interactome/results/")
+        #dp_saved.calculate_diffusion_profiles(msi)
 
-                distance_disease_drug = {}
-                #for every drug compute the diffusion profile distance
-                for drug_code in drug_codes_dict:
-                    #diffusion profile of the drug
-                    drug_r = dp_saved.drug_or_indication2diffusion_profile[drug_code] 
-                    #compute distance between disease:key and drug:drug_code
-                    distance_disease_drug[drug_code] = calculate_diffusion_profile_distance(disease_r,drug_r,metric)
-                
-                #sort drugs based on distance with the given disease.
-                distance_disease_drug = dict(sorted(distance_disease_drug.items(), key=lambda item: item[1]))
-                # compute metrics (average_precision,recall etc from predictions and true label pairs. ) 
-                true_ranking = {}
-                for drug_list in value:
-                    true_ranking[(drug_list[1])] = 1 # append the drug code
-                av_p,r50 = evaluate_disease(distance_disease_drug,true_ranking)
-                average_precision.append(av_p)
-                recall50.append(r50)
-            print("Mean Average Precision",sum(average_precision) / len(average_precision))
-            print("Mean Recall@50", sum(recall50) / len(recall50))
-              
-        elif(model=="protein_overlap"):
-            #define as the Jaccard Similarity between the set of drug targets T and the set of disease proteins S:
-            # 1) compute disease proteins S
-            for key,value in disease_to_drug_dict.items():
-                if(display_counter % 10 ==0):
-                    print("index",display_counter)
-                display_counter+= 1
-                S_proteins = disease_to_protein_dict[key]
-                distance_disease_drug = {}
+        dp_saved = DiffusionProfiles(alpha = None, max_iter = None, tol = None, weights = None, num_cores = None, save_load_file_path = "/data/multiscale-interactome/data/10_top_msi/")
+        msi.load_saved_node_idx_mapping_and_nodelist(dp_saved.save_load_file_path)
+        dp_saved.load_diffusion_profiles(msi.drugs_in_graph + msi.indications_in_graph)
+        print("Diffusion profiles loaded.")
 
-                for drug_code in drug_codes_dict:
-                    T_proteins = drug_to_protein_dict[drug_code]
-                    distance_disease_drug[drug_code] = calculate_jaccard_similarity(S_proteins,T_proteins)
-                
-                distance_disease_drug = dict(sorted(distance_disease_drug.items(), key=lambda item: item[1] , reverse=True))
+        # for each disease and drug compute the diffusion profiles r. Then for each disease, rank the drugs based on the distance of the diffusion profile r_disease and r_drug.
+        for key, value in disease_to_drug_dict.items():  #key is disease code, value is a list of ["disease_name","drug_code","drug_name"] cure the disease. 
+            if(key in train_indices):
+                continue
+            #diffusion profile of the disease
+            if(display_counter % 10 == 0):
+                print("index",display_counter)
+            display_counter+=1
+            disease_r = dp_saved.drug_or_indication2diffusion_profile[key]
 
-                # compute metrics (average_precision,recall etc from predictions and true label pairs. ) 
-                true_ranking = {}
-                for drug_list in value:
-                    true_ranking[(drug_list[1])] = 1 # append the drug code
-                av_p,r50 = evaluate_disease(distance_disease_drug,true_ranking)
-                average_precision.append(av_p)
-                recall50.append(r50)
-            print("Mean Average Precision",sum(average_precision) / len(average_precision))
-            print("Mean Recall@50", sum(recall50) / len(recall50))
+            distance_disease_drug = {}
+            #for every drug compute the diffusion profile distance
+            for drug_code in drug_codes_dict:
+                #diffusion profile of the drug
+                drug_r = dp_saved.drug_or_indication2diffusion_profile[drug_code] 
+                #compute distance between disease:key and drug:drug_code
+                distance_disease_drug[drug_code] = calculate_diffusion_profile_distance(disease_r,drug_r,metric)
             
+            #sort drugs based on distance with the given disease.
+            distance_disease_drug = dict(sorted(distance_disease_drug.items(), key=lambda item: item[1]))
+            # compute metrics (average_precision,recall etc from predictions and true label pairs. ) 
+            true_ranking = {}
+            for drug_list in value:
+                true_ranking[(drug_list[1])] = 1 # append the drug code
+            av_p,r50 = evaluate_disease(distance_disease_drug,true_ranking)
+            average_precision.append(av_p)
+            recall50.append(r50)
+        mean_average_precision = sum(average_precision) / len(average_precision)
+        mean_recall50 = sum(recall50) / len(recall50)
+        print("Mean Average Precision",mean_average_precision)
+        print("Mean Recall@50", mean_recall50)
+        return mean_average_precision,mean_recall50
+            
+    elif(model=="protein_overlap"):
+        #define as the Jaccard Similarity between the set of drug targets T and the set of disease proteins S:
+        # 1) compute disease proteins S
+        for key,value in disease_to_drug_dict.items():
+            if(key in train_indices):
+                continue
+            if(display_counter % 10 ==0):
+                print("index",display_counter)
+            display_counter+= 1
+            S_proteins = disease_to_protein_dict[key]
+            distance_disease_drug = {}
+
+            for drug_code in drug_codes_dict:
+                T_proteins = drug_to_protein_dict[drug_code]
+                distance_disease_drug[drug_code] = calculate_jaccard_similarity(S_proteins,T_proteins)
+            
+            distance_disease_drug = dict(sorted(distance_disease_drug.items(), key=lambda item: item[1] , reverse=True))
+
+            # compute metrics (average_precision,recall etc from predictions and true label pairs. ) 
+            true_ranking = {}
+            for drug_list in value:
+                true_ranking[(drug_list[1])] = 1 # append the drug code
+            av_p,r50 = evaluate_disease(distance_disease_drug,true_ranking)
+            average_precision.append(av_p)
+            recall50.append(r50)
+        mean_average_precision = sum(average_precision) / len(average_precision)
+        mean_recall50 = sum(recall50) / len(recall50)
+        print("Mean Average Precision",mean_average_precision)
+        print("Mean Recall@50", mean_recall50)
+        return mean_average_precision,mean_recall50
+
+    elif(model=="functional_overlap"):
+        pass
+    
+    elif(model=="node2vec"):
+        print("Load node embeddings")
+        #load drug to protein dict
+        with open(node_embeddings_path, 'rb') as handle:
+            node2vec_embeddings = pickle.load(handle)
+
+        # for each disease and drug compute the diffusion profiles r. Then for each disease, rank the drugs based on the distance of the diffusion profile r_disease and r_drug.
+        for key, value in disease_to_drug_dict.items():  #key is disease code, value is a list of ["disease_name","drug_code","drug_name"] cure the disease. 
+            if(key in train_indices):
+                continue
+            #diffusion profile of the disease
+            if(display_counter % 10 == 0):
+                print("index",display_counter)
+            display_counter+=1
+            disease_r = np.array(node2vec_embeddings[node2idx[key]])
+
+            distance_disease_drug = {}
+            #for every drug compute the diffusion profile distance
+            for drug_code in drug_codes_dict:
+                #diffusion profile of the drug
+                drug_r = np.array(node2vec_embeddings[node2idx[drug_code]]) 
+                #compute distance between disease:key and drug:drug_code
+                if(mlp==True):
+                    if(mlp_model_name.startswith("MLPSet")):
+                        distance_disease_drug[drug_code] = mlp_model(torch.unsqueeze(torch.tensor(np.stack((disease_r,drug_r))),dim=0))
+                    else:
+                        distance_disease_drug[drug_code] = mlp_model(torch.unsqueeze(torch.tensor(np.concatenate((disease_r,drug_r))),dim=0))
+                else:
+                    distance_disease_drug[drug_code] = calculate_diffusion_profile_distance(disease_r,drug_r,metric)
+            
+            #sort drugs based on distance with the given disease.
+            if(mlp==True):
+                distance_disease_drug = dict(sorted(distance_disease_drug.items(), key=lambda item: item[1],reverse=True))
+            else:
+                distance_disease_drug = dict(sorted(distance_disease_drug.items(), key=lambda item: item[1]))
+            # compute metrics (average_precision,recall etc from predictions and true label pairs. ) 
+            true_ranking = {}
+            for drug_list in value:
+                true_ranking[(drug_list[1])] = 1 # append the drug code
+            av_p,r50 = evaluate_disease(distance_disease_drug,true_ranking)
+            average_precision.append(av_p)
+            recall50.append(r50)
+        mean_average_precision = sum(average_precision) / len(average_precision)
+        mean_recall50 = sum(recall50) / len(recall50)
+        print("Mean Average Precision",mean_average_precision)
+        print("Mean Recall@50", mean_recall50)
+        return mean_average_precision,mean_recall50
 
 def evaluate_disease(ranked_predictions,true_ranking):
     '''
@@ -177,7 +265,7 @@ def evaluate_disease(ranked_predictions,true_ranking):
     '''
     #calculate average precision,recall@50
     average_precision,recall50 = calculate_average_precision_recall(ranked_predictions,true_ranking) 
-
+    
     return average_precision,recall50
 
 
@@ -227,7 +315,7 @@ def calculate_diffusion_profile_distance(r1,r2,metric="Correlation distance"):
         
 if __name__ == "__main__":
     construct_disease_drug_tsv()
-    evaluate_model(model="protein_overlap")
+    evaluate_model(model="node2vec",mlp=True)
     exit()
     msi = MSI()
     msi.load()
