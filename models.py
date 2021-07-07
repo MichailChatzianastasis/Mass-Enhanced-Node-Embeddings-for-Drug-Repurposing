@@ -17,6 +17,7 @@ from torch.utils.data import Dataset, DataLoader,TensorDataset
 from diff_prof.diffusion_profiles import DiffusionProfiles
 from tests.msi import test_msi
 import csv
+from tqdm import tqdm
 
 
 #import matplotlib.pyplot as plt
@@ -25,6 +26,7 @@ from torch_geometric.nn import Node2Vec
 from torch_geometric.datasets import AMiner
 from torch_geometric.nn import MetaPath2Vec
 from torch_geometric.data import Data, DataLoader
+from torch_geometric.nn import GENConv, DeepGCNLayer
 
 
 from torch_geometric.nn import GCNConv, GAE, VGAE
@@ -44,6 +46,7 @@ class ModelNode2Vec():
         self.path_edges = "./results/edges.pkl"
 
         #self.construct_msi_dataset_to_pg()
+        
         self.train_model()
   
 
@@ -53,7 +56,7 @@ class ModelNode2Vec():
         '''
         msi = MSI()
         msi.load()
-        
+
         with open(self.path_to_graph, 'rb') as handle:
             graph = pickle.load(handle)
 
@@ -78,19 +81,16 @@ class ModelNode2Vec():
             self.edges = pickle.load(handle)
 
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        #default c=10,p=q=1,walk_length=20,walks_per_node=10
+        #default walk_length=20,context_size=10,walks_per_node=10,p=q=1,,
+        #sequenece: walk_length,context_size,walks_per_node,num_negative_samples,p,q
 
-        walk_length_list = []
-        context_size_list = [5,20,50]
-        walks_per_node_list = []
-        num_negative_samples = []
-        q_list = []
-        p_list = []
-        for context_size in context_size_list:
-            print(context_size)
-            model = Node2Vec(self.edges, embedding_dim=self.EMB_DIM, walk_length=20,
-                            context_size=context_size, walks_per_node=10,
-                            num_negative_samples=1, p=1, q=1, sparse=True).to(device)
+
+        combinations = [[20,10,10,1,1,1],[20,10,10,5,1,1],[20,10,10,10,1,1],[30,10,10,1,1,1]]      
+        for combination in combinations:
+            print(combination)
+            model = Node2Vec(self.edges, embedding_dim=self.EMB_DIM, walk_length=combination[0],
+                            context_size=combination[1], walks_per_node=combination[2],
+                            num_negative_samples=combination[3], p=combination[4], q=combination[5], sparse=True).to(device)
         
             loader = model.loader(batch_size=128, shuffle=True, num_workers=12)
             optimizer = torch.optim.SparseAdam(list(model.parameters()), lr=0.01)
@@ -112,7 +112,7 @@ class ModelNode2Vec():
                 #print(f'Epoch: {epoch:02d}, Loss: {loss:.4f}, Acc: {acc:.4f}')
             
             node_embeddings = np.array(model.forward().data.cpu())
-            with open(f'/data/multiscale-interactome/data/node2vec_embeddings_{self.EMB_DIM}_{self.EPOCHS}_{str(context_size)}.pickle', 'wb') as handle:
+            with open(f'./data/node2vec_embeddings_{self.EMB_DIM}_{self.EPOCHS}_{str(combination[0])}_{str(combination[1])}_{str(combination[2])}_{str(combination[3])}_{str(combination[4])}_{str(combination[5])}.pickle', 'wb') as handle:
                 pickle.dump(node_embeddings, handle, protocol=pickle.HIGHEST_PROTOCOL)
  
 class MLP(nn.Module):
@@ -204,13 +204,13 @@ class MLPSetBilnear(nn.Module):
         return torch.sigmoid(x)
 
 class Dataset_Mlp(Dataset):
-    def __init__(self,node_embeddings_model="node2vec",node_embeddings_path="./data/node2vec_embeddings_256_200_10.pickle",EMB_DIM=256,mlp_bool=True,mlp_model=None,mlp_epochs=1):
+    def __init__(self,node_embeddings_model="node2vec",node_embeddings_path="./data/node2vec_embeddings_256_200_10.pickle",EMB_DIM=256,downstream_model="mlp",mlp_model=None,mlp_epochs=1):
         #self.x = torch.tensor(x,dtype=torch.float32)
         #self.y = torch.tensor(y,dtype=torch.float32)
         #self.length = self.x.shape[0]
         self.node_embeddings_path = node_embeddings_path
         self.EMB_DIM = EMB_DIM
-        self.mlp_bool = mlp_bool
+        self.downstream_model = downstream_model
         self.mlp_model = mlp_model
         self.mlp_epochs = mlp_epochs
         self.node_embeddings_model = node_embeddings_model
@@ -255,7 +255,7 @@ class Dataset_Mlp(Dataset):
         if(self.node_embeddings_model=="diffusion_profiles"):
             msi = MSI()
             msi.load()
-            dp_saved = DiffusionProfiles(alpha = None, max_iter = None, tol = None, weights = None, num_cores = None, save_load_file_path = "/data/multiscale-interactome/data/10_top_msi/")
+            dp_saved = DiffusionProfiles(alpha = None, max_iter = None, tol = None, weights = None, num_cores = None, save_load_file_path = "./data/10_top_msi/")
             msi.load_saved_node_idx_mapping_and_nodelist(dp_saved.save_load_file_path)
             dp_saved.load_diffusion_profiles(msi.drugs_in_graph + msi.indications_in_graph)
             node_embeddings = dp_saved.drug_or_indication2diffusion_profile
@@ -322,7 +322,8 @@ class Dataset_Mlp(Dataset):
 
             for disease in disease_to_drug_dict:
                 counter = 0
-                while(counter<40):
+                #40
+                while(counter<3):
                     positive = False
                     random_key = random.choice(list(drug_codes_dict.keys()))
                     approved_drugs = disease_to_drug_dict[disease]
@@ -338,7 +339,8 @@ class Dataset_Mlp(Dataset):
             
             for drug in drug_to_disease_dict:
                 counter = 0
-                while(counter<3):
+                #3
+                while(counter<2):
                     positive = False
                     #generate random disease code
                     random_key = random.choice(list(disease_codes_dict.keys()))
@@ -413,10 +415,22 @@ class Dataset_Mlp(Dataset):
 
             print("Train",len(X_positive_train),len(X_negative_train))
             print("Test",len(X_positive_test),len(X_negative_test))
-            res = train_MLP(torch.stack((X_train)), torch.stack((X_test)), y_train, y_test, indices,self.node_embeddings_path,
+            if(self.downstream_model == "gnn"):
+                res = train_GNN(X_positive_codes_train,X_negative_codes_train,X_negative_codes_train,X_negative_codes_test,
+                                                                                                    node_embeddings,
+                                                                                                    indices,
+                                                                                                    self.node_embeddings_path, 
+                                                                                                    self.EMB_DIM, 
+                                                                                                    self.node_embeddings_model,
+                                                                                                    self.downstream_model,
+                                                                                                    self.mlp_model,
+                                                                                                    self.mlp_epochs)
+            else: 
+                res = train_MLP(torch.stack((X_train)), torch.stack((X_test)), y_train, y_test, indices,
+                                                                                                    self.node_embeddings_path,
                                                                                                     self.EMB_DIM,
                                                                                                     self.node_embeddings_model,
-                                                                                                    self.mlp_bool,
+                                                                                                    self.downstream_model,
                                                                                                     self.mlp_model,
                                                                                                     self.mlp_epochs
                                                                                                     )
@@ -433,13 +447,13 @@ class Dataset_Mlp(Dataset):
         print("Average recall50:", final_ar)
         print("Median rocauc", final_roc)
         with open('./data/results.txt','a') as handle:
-            handle.write(f'{self.node_embeddings_path} {self.mlp_model}_{self.mlp_epochs} {final_ap} {final_ar} {final_roc}\n')
+            handle.write(f'{self.node_embeddings_path} {self.node_embeddings_model} {self.downstream_model} {self.mlp_model}_{self.mlp_epochs} {final_ap} {final_ar} {final_roc}\n')
 
-def train_MLP(X_train,X_test,y_train,y_test,indices,node_embeddings_path,EMB_DIM,node_embeddings_model,mlp_bool,mlp_model,mlp_epochs):
+def train_MLP(X_train,X_test,y_train,y_test,indices,node_embeddings_path,EMB_DIM,node_embeddings_model,downstream_model,mlp_model,mlp_epochs):
     from evaluate import evaluate_model
     from evaluate import construct_disease_drug_tsv
     
-    if(mlp_bool == True):
+    if(downstream_model == "mlp"):
         if(mlp_model.startswith("MLPSet") == False):
             dataset_train = TensorDataset(torch.reshape(X_train,(-1,2*X_train.shape[-1])),y_train.type(torch.FloatTensor))
             dataset_test =  TensorDataset(torch.reshape(X_test,(-1,2*X_test.shape[-1])),y_test.type(torch.FloatTensor))
@@ -451,12 +465,15 @@ def train_MLP(X_train,X_test,y_train,y_test,indices,node_embeddings_path,EMB_DIM
         trainloader = DataLoader(dataset_train,batch_size=16,shuffle=True)
         testloader = DataLoader(dataset_test,batch_size=16,shuffle=True)
         
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    
         epochs = mlp_epochs
-        model = eval(mlp_model)(EMB_DIM)
+        model = eval(mlp_model)(EMB_DIM).to(device)
         criterion = nn.BCELoss()
         optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
-
+       
         #forward loop
+        model.train()
         losses = []
         accur = []
         losses_test = []
@@ -465,6 +482,7 @@ def train_MLP(X_train,X_test,y_train,y_test,indices,node_embeddings_path,EMB_DIM
         n_batches_test = len(testloader)
         for i in range(epochs):
             for j,(x_train,y_train) in enumerate(trainloader):
+                x_train,y_train = x_train.to(device),y_train.to(device)
                 #zero gradients
                 optimizer.zero_grad()
                 #calculate output
@@ -483,6 +501,7 @@ def train_MLP(X_train,X_test,y_train,y_test,indices,node_embeddings_path,EMB_DIM
             model.eval()
             with torch.no_grad():
                 for j,(x_test,y_test) in enumerate(testloader):
+                    x_test,y_test = x_test.to(device),y_test.to(device)
                     output = model(x_test).squeeze()
                     #calculate loss
                     loss = criterion(output,y_test.squeeze())
@@ -494,12 +513,230 @@ def train_MLP(X_train,X_test,y_train,y_test,indices,node_embeddings_path,EMB_DIM
                 print("Test: epoch {}\tloss : {}\t accuracy : {}".format(i,np.mean(losses_test[n_batches_test*i:n_batches_test*(i+1)]),np.mean(accur_test[n_batches_test*i:n_batches_test*(i+1)])))         
         torch.save(model.state_dict(), "./data/MLP_model_"+str(EMB_DIM))
     construct_disease_drug_tsv()
-    return evaluate_model( model=node_embeddings_model, 
-                            mlp=mlp_bool, 
+    return evaluate_model(  model=node_embeddings_model, 
+                            downstream_model=downstream_model, 
                             mlp_model_name=mlp_model,
                             node_embeddings_path=node_embeddings_path,
-                            EMB_DIM=EMB_DIM, indices=indices
+                            EMB_DIM=EMB_DIM, 
+                            indices=indices
                             )
+
+class GNN(torch.nn.Module):
+    '''
+    GNN for node pair classification. It propagates the graph, and predicts if a certain disease treat a certain drug. (like the MLP above)
+    Experiments with and without node features
+    '''
+    def __init__(self,node_features,edge_index,num_features,final_node_dimensions):
+        super(GNN, self).__init__()
+        self.conv1 = GCNConv(num_features, num_features)
+        self.conv2 = GCNConv(num_features, 64)
+        self.conv3 = GCNConv(64, final_node_dimensions)
+        self.linear = nn.Linear(final_node_dimensions,1)
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(p=0.2)
+        self.node_features = node_features
+        self.edge_index = edge_index
+        
+    def forward(self,pair_index):
+        x = self.relu(self.conv1(self.node_features, self.edge_index))
+        x = self.dropout(x)
+        x = self.relu(self.conv2(x,self.edge_index))
+        x = self.dropout(x)
+        x = self.conv3(x, self.edge_index)
+        #compute the pair representation
+        pair_repr = torch.mul(x[pair_index[:,0]],x[pair_index[:,1]])
+        x = self.linear(pair_repr)
+        return torch.sigmoid(x)
+
+
+class Dataset_GNN():
+    def __init__(self,node_embeddings={}):
+        super(Dataset_GNN, self).__init__()
+        self.edges = []
+        self.x = [] # node attributes : one-hot vectors indicating the node type ( drug,disease,protein,biological function)
+        self.msi = []
+        
+        self.construct_msi_dataset_to_pg(node_embeddings)
+
+    def idx2onehot(self,idx):
+        result = []
+        if(type(idx) == list):
+            for i in idx:
+                result.append(self.msi.type2onehot[self.msi.node2type[self.msi.idx2node[i]]])
+        else:
+            result = self.msi.type2onehot[self.msi.node2type[self.msi.idx2node[idx]]]
+        
+        return result
+
+    def construct_msi_dataset_to_pg(self,node_embeddings):
+        #self.msi = MSI()
+        #self.msi.load()
+        with open('./data/msi.pickle', 'rb') as handle:
+            self.msi = pickle.load(handle)
+        
+        self.msi.type2onehot = { "drug" : [1,0,0,0],
+                                "indication" : [0,1,0,0],
+                                "protein" : [0,0,1,0],
+                                "biological_function" : [0,0,0,1]
+                                }
+
+        #construct edges
+        start_node_list = []
+        end_node_list = []
+        for edge in self.msi.graph.edges:
+                start_node_list.append(self.msi.node2idx[edge[0]])
+                end_node_list.append(self.msi.node2idx[edge[1]])
+        self.edge_index = torch.tensor([start_node_list,end_node_list],dtype=torch.long)    
+        
+        #construct node features (one hot indicating node type or node embeddings from node2vec etc)
+        features = []
+        if(len(node_embeddings)==0):
+            for idx in self.msi.idx2node:
+                features.append(self.idx2onehot(idx))
+            self.num_features = 4
+        else:
+            for idx in self.msi.idx2node:
+                features.append(node_embeddings[idx])
+            self.num_features = len(node_embeddings[0])
+        self.x = torch.tensor(features, dtype=torch.float)
+        self.data = Data(x=self.x, edge_index=self.edge_index)      
+
+        #self.loader = DataLoader([self.data], batch_size=32)
+
+
+
+def train_GNN(X_positive_codes_train,X_negative_codes_train,X_positive_codes_test,X_negative_codes_test,
+                                                                                    node_embeddings,
+                                                                                    indices,
+                                                                                    node_embeddings_path, 
+                                                                                    EMB_DIM, 
+                                                                                    node_embeddings_model,
+                                                                                    downstream_model,
+                                                                                    mlp_model,
+                                                                                    mlp_epochs
+                                                                                    ):        
+    from evaluate import evaluate_model
+    from evaluate import construct_disease_drug_tsv
+    
+    dataset_gnn = Dataset_GNN(node_embeddings)
+
+    X_train = []
+    y_train = []
+    X_test = []
+    y_test = []
+
+    for sample in X_positive_codes_train:
+        start = torch.tensor(dataset_gnn.msi.node2idx[sample[0]])
+        end = torch.tensor(dataset_gnn.msi.node2idx[sample[1]])
+        X_train.append(torch.stack([start,end]))
+        y_train.append(1)
+
+    for sample in X_negative_codes_train:
+        start = torch.tensor(dataset_gnn.msi.node2idx[sample[0]])
+        end = torch.tensor(dataset_gnn.msi.node2idx[sample[1]])
+        X_train.append(torch.stack([start,end]))
+        y_train.append(0)
+
+    for sample in X_positive_codes_test:
+        start = torch.tensor(dataset_gnn.msi.node2idx[sample[0]])
+        end = torch.tensor(dataset_gnn.msi.node2idx[sample[1]])
+        X_test.append(torch.stack([start,end]))
+        y_test.append(1)
+
+    for sample in X_negative_codes_test:
+        start = torch.tensor(dataset_gnn.msi.node2idx[sample[0]])
+        end = torch.tensor(dataset_gnn.msi.node2idx[sample[1]])
+        X_test.append(torch.stack([start,end]))
+        y_test.append(0)
+
+    y_train = torch.tensor(y_train)
+    y_test = torch.tensor(y_test)
+
+
+    dataset_train = TensorDataset(torch.stack(X_train),y_train.type(torch.FloatTensor))
+    dataset_test = TensorDataset(torch.stack(X_test),y_test.type(torch.FloatTensor))
+
+    #DataLoader
+    trainloader = DataLoader(dataset_train,batch_size=16,shuffle=True)
+    testloader = DataLoader(dataset_test,batch_size=16,shuffle=True)
+
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    model = GNN(node_features = dataset_gnn.data.x.to(device),
+                edge_index = dataset_gnn.data.edge_index.to(device),
+                num_features = dataset_gnn.num_features,
+                final_node_dimensions = 64).to(device)
+    criterion = nn.BCELoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
+
+    #forward loop
+    epochs = mlp_epochs
+    model.train()
+    losses = []
+    accur = []
+    losses_test = []
+    accur_test = []
+    n_batches = len(trainloader)
+    n_batches_test = len(testloader)
+
+
+    for i in range(epochs):
+        for j,(x_train,y_train) in enumerate(trainloader): #x_train contains the pairs of nodes to evaluate
+            x_train, y_train = x_train.to(device),y_train.to(device)
+            #zero gradients
+            optimizer.zero_grad()
+            #calculate output
+            output = model(x_train).squeeze()
+            #calculate loss
+            loss = criterion(output,y_train.squeeze())
+            #accuracy
+            correct = (torch.round(output) == y_train).float().sum().detach().item()
+            acc = correct / y_train.shape[0]
+            #backprop
+            loss.backward()
+            optimizer.step()
+            
+            losses.append(loss.detach().item())
+            accur.append(acc)
+        print("Train: epoch {}\tloss : {}\t accuracy : {}".format(i,np.mean(losses[n_batches*i:n_batches*(i+1)]),np.mean(accur[n_batches*i:n_batches*(i+1)])))
+        model.eval()
+        with torch.no_grad():
+            for j,(x_test,y_test) in enumerate(testloader):
+                x_test, y_test = x_test.to(device),y_test.to(device)
+                
+                output = model(x_test).squeeze()
+                #calculate loss
+                loss = criterion(output,y_test.squeeze())
+                #accuracy
+                correct = (torch.round(output) == y_test).float().sum().detach().item()
+                acc = correct / y_test.shape[0]
+                losses_test.append(loss.detach().item())
+                accur_test.append(acc)
+            print("Test: epoch {}\tloss : {}\t accuracy : {}".format(i,np.mean(losses_test[n_batches_test*i:n_batches_test*(i+1)]),np.mean(accur_test[n_batches_test*i:n_batches_test*(i+1)])))         
+        torch.save(model.state_dict(), "./data/GNN_model_"+str(EMB_DIM))  
+    construct_disease_drug_tsv()
+    return evaluate_model( model=node_embeddings_model, 
+                            downstream_model=downstream_model, 
+                            mlp_model_name=mlp_model,
+                            node_embeddings_path=node_embeddings_path,
+                            EMB_DIM=EMB_DIM, 
+                            indices=indices,
+                            gnn_params = { "node_features" : dataset_gnn.data.x,
+                                        "edge_index" : dataset_gnn.data.edge_index,
+                                        "num_features" : dataset_gnn.num_features,
+                                        "final_node_dimensions" : 64
+                                        }
+                            )
+    
+
+
+
+
+
+
+
+
+
+
     
 class ModelMetaPath2Vec():
     "NEED FIX"
@@ -806,7 +1043,7 @@ class DatasetAutoencoder():
 
         node_embeddings = np.array(self.model.encode(x,self.edge_index).data.cpu())
         print(node_embeddings)
-        with open(f'/data/multiscale-interactome/data/VariationalGCNEncoder_embeddings_{self.EMB_DIM}_{self.EPOCHS}.pickle', 'wb') as handle:
+        with open(f'./data/VariationalGCNEncoder_embeddings_{self.EMB_DIM}_{self.EPOCHS}.pickle', 'wb') as handle:
             pickle.dump(node_embeddings, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
 
@@ -903,33 +1140,36 @@ def test_geometric():
         print(f'Epoch: {epoch}, Accuracy: {acc:.4f}')
 
 if __name__ == "__main__":
+
     #node2vec hyperparams
     EMB_DIM = 128
-    NODE2VEC_EPOCHS = 20
-    CONTEXT_SIZE =5
-
-    #datasetAutoencoder = DatasetAutoencoder(EMB_DIM,NODE2VEC_EPOCHS) #train graph autoencoder
-    #configuration
-    #EMB_DIM = 29959 # Diffusion profile
-    MLP_MODEL = "MLP" 
-    MLP_BOOL= True #use mlp or no
-    MLP_EPOCHS = 1
-    NODE_EMBEDDINGS_MODEL = "node2vec" 
-    NODE_EMBEDDINGS_PATH = f"./data/node2vec_embeddings_{str(EMB_DIM)}_{str(NODE2VEC_EPOCHS)}_{str(CONTEXT_SIZE)}.pickle"
-    
-    #Train node2vec
+    NODE2VEC_EPOCHS = 120
+    combinations = [[20,10,10,1,1,1],[20,10,10,5,1,1],[20,10,10,10,1,1],[30,10,10,1,1,1]]  
+    #Train node2vec    
     #ModelNode2Vec(EMB_DIM,NODE2VEC_EPOCHS)
     
-    #mlp_model = "MLPSetBilnear"
+    for combination in combinations:
+        #datasetAutoencoder = DatasetAutoencoder(EMB_DIM,NODE2VEC_EPOCHS) #train graph autoencoder
+        #configuration
+        #EMB_DIM = 29959 # Diffusion profile
+        MLP_MODEL = "MLP" 
+        downstream_model= "mlp"  #use mlp or no
+        MLP_EPOCHS = 40
+        NODE_EMBEDDINGS_MODEL = "node2vec" 
+        NODE_EMBEDDINGS_PATH = f'./data/node2vec_embeddings_{EMB_DIM}_{NODE2VEC_EPOCHS}_{str(combination[0])}_{str(combination[1])}_{str(combination[2])}_{str(combination[3])}_{str(combination[4])}_{str(combination[5])}.pickle'
 
-    print("Node_embeddings_model:", NODE_EMBEDDINGS_MODEL,"Mlp_model:",MLP_MODEL,"EMB_DIM:",EMB_DIM)
+        
+        #mlp_model = "MLPSetBilnear"
 
-    #dataset = Dataset_Mlp(NODE_EMBEDDINGS_MODEL,"./data/node2vec_embeddings_"+str(EMB_DIM)+"_"+str(NODE2VEC_EPOCHS)+".pickle",EMB_DIM,MLP_MODEL)
-    dataset = Dataset_Mlp(node_embeddings_model = NODE_EMBEDDINGS_MODEL,
-                          node_embeddings_path = NODE_EMBEDDINGS_PATH,
-                          EMB_DIM = EMB_DIM,
-                          mlp_bool = MLP_BOOL,
-                          mlp_model = MLP_MODEL,
-                          mlp_epochs = MLP_EPOCHS)
+        print("Node_embeddings_model:", NODE_EMBEDDINGS_MODEL,"Mlp_model:",MLP_MODEL,"EMB_DIM:",EMB_DIM)
 
-    dataset.construct_dataset_from_node_embeddings()
+        #dataset = Dataset_Mlp(NODE_EMBEDDINGS_MODEL,"./data/node2vec_embeddings_"+str(EMB_DIM)+"_"+str(NODE2VEC_EPOCHS)+".pickle",EMB_DIM,MLP_MODEL)
+        dataset = Dataset_Mlp(node_embeddings_model = NODE_EMBEDDINGS_MODEL,
+                            node_embeddings_path = NODE_EMBEDDINGS_PATH,
+                            EMB_DIM = EMB_DIM,
+                            downstream_model = downstream_model,
+                            mlp_model = MLP_MODEL,
+                            mlp_epochs = MLP_EPOCHS)
+
+        dataset.construct_dataset_from_node_embeddings()
+        exit()

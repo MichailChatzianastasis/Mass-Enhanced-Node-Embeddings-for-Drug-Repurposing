@@ -26,10 +26,10 @@ def construct_disease_drug_tsv():
     '''
     Construct a tsv with disease-drug pairs. ( We currently have drug-disease pairs)
     '''
-    drug_disease_tsv = pd.read_csv("/data/multiscale-interactome/data/6_drug_indication_df.tsv",sep='\t', header=0)
+    drug_disease_tsv = pd.read_csv("./data/6_drug_indication_df.tsv",sep='\t', header=0)
     disease_drug_tsv = drug_disease_tsv.sort_values(by='indication')
     disease_drug_tsv = disease_drug_tsv[["indication","indication_name","drug","drug_name"]]
-    disease_drug_tsv.to_csv("/data/multiscale-interactome/data/disease_drug_df.tsv",sep="\t", index=False)
+    disease_drug_tsv.to_csv("./data/disease_drug_df.tsv",sep="\t", index=False)
     
 
   
@@ -42,7 +42,7 @@ def construct_disease_drug_tsv():
         else:
             dict_to_save[row[0]] = [[row[1],row[2],row[3]]]
     
-    with open('/data/multiscale-interactome/data/disease_to_drug_dict.pickle', 'wb') as handle:
+    with open('./data/disease_to_drug_dict.pickle', 'wb') as handle:
         pickle.dump(dict_to_save, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
     #create dictionary with drugs as keys.
@@ -53,50 +53,50 @@ def construct_disease_drug_tsv():
         else:
             dict_to_save[row[0]] = [[row[2]]]
 
-    with open('/data/multiscale-interactome/data/drug_to_disease_dict.pickle', 'wb') as handle:
+    with open('./data/drug_to_disease_dict.pickle', 'wb') as handle:
         pickle.dump(dict_to_save, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
     # construct list of drugs
     drug_list_codes = {}
     for index,row in drug_disease_tsv.iterrows():
         drug_list_codes[row[0]]=1
-    with open('/data/multiscale-interactome/data/drug_codes_dict.pickle', 'wb') as handle:
+    with open('./data/drug_codes_dict.pickle', 'wb') as handle:
         pickle.dump(drug_list_codes, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
     #construct list of diseases
     disease_list_codes = {}
     for key in dict_to_save:
         disease_list_codes[key]=1
-    with open('/data/multiscale-interactome/data/disease_codes_dict.pickle', 'wb') as handle:
+    with open('./data/disease_codes_dict.pickle', 'wb') as handle:
         pickle.dump(disease_list_codes, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
     #construct list of diseases
 
     #drug to protein dict
-    drug_to_protein_tsv = pd.read_csv("/data/multiscale-interactome/data/1_drug_to_protein.tsv",sep='\t', header=0)
+    drug_to_protein_tsv = pd.read_csv("./data/1_drug_to_protein.tsv",sep='\t', header=0)
     dict_to_save = {}
     for index,row in drug_to_protein_tsv.iterrows():
         if(row[0] in dict_to_save):
             dict_to_save[row[0]].append(row[1])
         else:
             dict_to_save[row[0]] = [row[1]]
-    with open('/data/multiscale-interactome/data/drug_to_protein_dict.pickle', 'wb') as handle:
+    with open('./data/drug_to_protein_dict.pickle', 'wb') as handle:
         pickle.dump(dict_to_save, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
     #disease to protein dict
-    disease_to_protein_tsv = pd.read_csv("/data/multiscale-interactome/data/2_indication_to_protein.tsv",sep='\t', header=0)
+    disease_to_protein_tsv = pd.read_csv("./data/2_indication_to_protein.tsv",sep='\t', header=0)
     dict_to_save = {}
     for index,row in disease_to_protein_tsv.iterrows():
         if(row[0] in dict_to_save):
             dict_to_save[row[0]].append(row[1])
         else:
             dict_to_save[row[0]] = [row[1]]
-    with open('/data/multiscale-interactome/data/disease_to_protein_dict.pickle', 'wb') as handle:
+    with open('./data/disease_to_protein_dict.pickle', 'wb') as handle:
         pickle.dump(dict_to_save, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
 
 
-def evaluate_model(model="diffusion_profiles",mlp=False,mlp_model_name=None,metric="Correlation distance",node_embeddings_path=None,EMB_DIM=256,indices=None):
+def evaluate_model(model="diffusion_profiles",downstream_model="other",mlp_model_name=None,metric="Correlation distance",node_embeddings_path=None,EMB_DIM=256,indices=None,gnn_params={}):
     ''' 
         For each disease, the model produces a ranked list of drugs. We identify the drugs approved to treat the disease (drug-disease labels).
         For each disease, we then compute the model’s AUROC, Average Precision,and Recall@50 values based on the ranked list of drugs. 
@@ -140,11 +140,16 @@ def evaluate_model(model="diffusion_profiles",mlp=False,mlp_model_name=None,metr
     with open("./data/disease_codes_dict.pickle",'rb') as handle:
         disease_codes_dict = pickle.load(handle)
     
-    if(mlp==True):
+    if(downstream_model=="mlp"):
         mlp_model = eval(mlp_model_name)(EMB_DIM)
         mlp_model.load_state_dict(torch.load("./data/MLP_model_"+str(EMB_DIM)))
         mlp_model.eval()
-    
+
+    elif(downstream_model =="gnn"):
+        mlp_model = eval("GNN")(gnn_params["node_features"],gnn_params["edge_index"],gnn_params["num_features"],gnn_params["final_node_dimensions"])
+        mlp_model.load_state_dict(torch.load("./data/GNN_model_"+str(EMB_DIM)))
+        mlp_model.eval()
+
     display_counter = 0
     if(indices is not None):
         train_indices,test_indices = indices
@@ -163,7 +168,7 @@ def evaluate_model(model="diffusion_profiles",mlp=False,mlp_model_name=None,metr
         #                'drug': 3.2071696595616364}, num_cores = int(multiprocessing.cpu_count()/2) - 4, save_load_file_path = "/data/multiscale-interactome/results/")
         #dp_saved.calculate_diffusion_profiles(msi)
 
-        dp_saved = DiffusionProfiles(alpha = None, max_iter = None, tol = None, weights = None, num_cores = None, save_load_file_path = "/data/multiscale-interactome/data/10_top_msi/")
+        dp_saved = DiffusionProfiles(alpha = None, max_iter = None, tol = None, weights = None, num_cores = None, save_load_file_path = "./data/10_top_msi/")
         msi.load_saved_node_idx_mapping_and_nodelist(dp_saved.save_load_file_path)
         dp_saved.load_diffusion_profiles(msi.drugs_in_graph + msi.indications_in_graph)
         print("Diffusion profiles loaded.")
@@ -290,11 +295,15 @@ def evaluate_model(model="diffusion_profiles",mlp=False,mlp_model_name=None,metr
                 #diffusion profile of the drug
                 drug_r = np.array(node2vec_embeddings[node2idx[drug_code]]) 
                 #compute distance between disease:key and drug:drug_code
-                if(mlp==True):
+                if(downstream_model=="mlp"):
                     if(mlp_model_name.startswith("MLPSet")):
                         distance_disease_drug[drug_code] = mlp_model(torch.unsqueeze(torch.tensor(np.stack((drug_r,disease_r))),dim=0)).detach().item()
                     else:
                         distance_disease_drug[drug_code] = mlp_model(torch.unsqueeze(torch.tensor(np.concatenate((drug_r,disease_r))),dim=0)).detach().item()
+                elif(downstream_model=="gnn"):
+                    pair_index = torch.unsqueeze(torch.tensor([node2idx[drug_code],node2idx[key]]),dim=0)
+
+                    distance_disease_drug[drug_code] = mlp_model(pair_index).detach().item()
                 else:
                     distance_disease_drug[drug_code] =  calculate_diffusion_profile_distance(drug_r,disease_r,metric)
                 
@@ -426,7 +435,7 @@ if __name__ == "__main__":
     construct_disease_drug_tsv()
     
     exit()
-    evaluate_model(model="node2vec",mlp=True)
+    evaluate_model(model="node2vec",downstream_model="mlp")
     msi = MSI()
     msi.load()
     # Test against reference
