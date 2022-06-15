@@ -10,6 +10,7 @@ from models import MLP
 from models import MLP2
 from models import MLPSet
 from models import *
+import datetime
 
 from tests.msi import test_msi
 from tests.diff_prof import test_diffusion_profiles
@@ -118,7 +119,7 @@ def evaluate_model(model="diffusion_profiles",downstream_model="other",mlp_model
     average_precision = []
     recall50 = []
     rocauc = []
-    
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     #load disease drug dict
     with open('./data/disease_to_drug_dict.pickle', 'rb') as handle:
         disease_to_drug_dict = pickle.load(handle)
@@ -146,9 +147,13 @@ def evaluate_model(model="diffusion_profiles",downstream_model="other",mlp_model
         mlp_model.eval()
 
     elif(downstream_model =="gnn"):
-        mlp_model = eval("GNN")(gnn_params["node_features"],gnn_params["edge_index"],gnn_params["num_features"],gnn_params["final_node_dimensions"])
+        mlp_model = eval("GNN")(gnn_params["node_features"],gnn_params["edge_index"],gnn_params["num_features"],gnn_params["final_node_dimensions"],gnn_params["gnn_embeddings_path"],evaluation=True).to(device)
         mlp_model.load_state_dict(torch.load("./data/GNN_model_"+str(EMB_DIM)))
         mlp_model.eval()
+
+    elif(downstream_model=="svm" or downstream_model=="rf" or downstream_model == "ada"):
+        mlp_model = mlp_model_name
+        print("inside")
 
     display_counter = 0
     if(indices is not None):
@@ -204,7 +209,7 @@ def evaluate_model(model="diffusion_profiles",downstream_model="other",mlp_model
                 distance_disease_drug[drug_code] = calculate_diffusion_profile_distance(drug_r,disease_r,metric)  #compute similarity
             
             #sort drugs based on distance with the given disease.
-            distance_disease_drug = dict(sorted(distance_disease_drug.items(), key=lambda item: item[1]), reverse=True)
+            distance_disease_drug = dict(sorted(distance_disease_drug.items(), key=lambda item: item[1]), reverse=False)
             # compute metrics (average_precision,recall etc from predictions and true label pairs. ) 
          
             av_p,r50,rc = evaluate_disease(distance_disease_drug,true_ranking)
@@ -302,8 +307,9 @@ def evaluate_model(model="diffusion_profiles",downstream_model="other",mlp_model
                         distance_disease_drug[drug_code] = mlp_model(torch.unsqueeze(torch.tensor(np.concatenate((drug_r,disease_r))),dim=0)).detach().item()
                 elif(downstream_model=="gnn"):
                     pair_index = torch.unsqueeze(torch.tensor([node2idx[drug_code],node2idx[key]]),dim=0)
-
-                    distance_disease_drug[drug_code] = mlp_model(pair_index).detach().item()
+                    distance_disease_drug[drug_code] = mlp_model(pair_index,evaluation = True).detach().item()
+                elif(downstream_model == "svm" or downstream_model == "rf" or downstream_model =="ada"):
+                    distance_disease_drug[drug_code] = mlp_model.predict_proba(np.expand_dims(np.concatenate((drug_r,disease_r)),axis=0))[0][1]
                 else:
                     distance_disease_drug[drug_code] =  calculate_diffusion_profile_distance(drug_r,disease_r,metric)
                 
