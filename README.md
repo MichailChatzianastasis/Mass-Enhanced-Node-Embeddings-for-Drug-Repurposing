@@ -8,7 +8,7 @@ Graph representation learning has recently emerged as a promising approach to so
 networks. Among the different tasks, drug repurposing, the task of identifying new uses for approved or investigational drugs, has attracted a lot of attention recently. In this work, we propose a node embedding algorithm for the problem of drug repurposing. The proposed algorithm learns node representations that capture the influence of nodes in the biological network by learning a mass term for each node along with its embedding. We apply the proposed algorithm to a multiscale interactome network and embed its nodes (i. e., proteins, drugs, diseases and biological functions) into a low dimensional space. We evaluate the generated embeddings in the drug repurposing task. Our experiments show that the proposed approach outperforms the baselines and offers an improvement of 53.33% in average precision over typical walk-based embedding approaches.
 
 <div align=center>
-<img src=https://github.com/MichailChatzianastasis/Mass-Enhanced-Node-Embeddings-for-Drug-Repurposing/blob/main/figures/drug_disease.drawio.jpg width="100%">
+<img src=https://github.com/MichailChatzianastasis/Mass-Enhanced-Node-Embeddings-for-Drug-Repurposing/blob/master/figures/drug_disease.drawio.jpg width="100%">
 </div>
 
 ## Data
