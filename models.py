@@ -18,7 +18,13 @@ from diff_prof.diffusion_profiles import DiffusionProfiles
 from tests.msi import test_msi
 import csv
 from tqdm import tqdm
+import torch.nn.functional as F
 
+from sklearn.ensemble import RandomForestClassifier,AdaBoostClassifier
+from sklearn import svm 
+from sklearn.gaussian_process import GaussianProcessClassifier
+from sklearn.gaussian_process.kernels import RBF
+from sklearn.neighbors import KNeighborsClassifier
 
 #import matplotlib.pyplot as plt
 #from sklearn.manifold import TSNE
@@ -26,12 +32,510 @@ from torch_geometric.nn import Node2Vec
 from torch_geometric.datasets import AMiner
 from torch_geometric.nn import MetaPath2Vec
 from torch_geometric.data import Data, DataLoader
-from torch_geometric.nn import GENConv, DeepGCNLayer
+from torch_geometric.nn import GENConv, DeepGCNLayer, GATConv
 
 
 from torch_geometric.nn import GCNConv, GAE, VGAE
 from torch_geometric.utils import train_test_split_edges
 import torch_geometric.transforms as T
+
+import networkx as nx
+import numpy as np
+import torch
+import torch.optim as optim
+
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+from torch.nn import init
+from torch.nn.parameter import Parameter
+
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score
+
+from data_reader import DataReader, Word2vecDataset
+import stellargraph as sg
+from stellargraph.data import UniformRandomMetaPathWalk
+from gensim.models import Word2Vec
+
+
+class DeepwalkModel(nn.Module):
+    def __init__(self, emb_size, emb_dimension):
+            super(DeepwalkModel, self).__init__()
+            self.emb_size = emb_size
+            self.lamb = 0.1
+            self.emb_dimension = emb_dimension
+            self.u_embeddings = nn.Embedding(emb_size, emb_dimension, sparse=True)
+            self.v_embeddings = nn.Embedding(emb_size, emb_dimension, sparse=True)
+
+            self.mass = nn.Embedding(emb_size, 1, sparse=True)
+
+            initrange = 1.0 / self.emb_dimension
+            init.uniform_(self.u_embeddings.weight.data, -initrange, initrange)
+            init.constant_(self.v_embeddings.weight.data, 0)
+            # init.uniform_(self.v_embeddings.weight.data, -initrange, initrange)
+            # init.uniform_(self.mass.weight.data, -initrange, initrange)
+            #init.constant_(self.mass.weight.data, 1)
+            
+    def forward(self, pos_u, pos_v, neg_v):
+        emb_u = self.u_embeddings(pos_u)
+        emb_v = self.v_embeddings(pos_v)
+        emb_neg_v = self.v_embeddings(neg_v)
+        #mass = self.mass(pos_u)
+        #mass_v = self.mass(pos_v)
+        #mass_neg_v = self.mass(neg_v)
+        
+        score = torch.sum(torch.mul(emb_u, emb_v), dim=1)
+        score = torch.clamp(score, max=10, min=-10)
+        score = -F.logsigmoid(score)
+
+        neg_score = torch.bmm(emb_neg_v, emb_u.unsqueeze(2)).squeeze()
+        neg_score = torch.clamp(neg_score, max=10, min=-10)
+        neg_score = -torch.sum(F.logsigmoid(-neg_score), dim=1)
+
+        #dist = torch.sum(torch.pow(emb_u-emb_v, 2), dim=1)
+        dist = torch.sum(torch.mul(emb_u, emb_v), dim=1)
+        #score = mass*mass_v - self.lamb*torch.log(dist)
+        # score = mass*mass_v / (self.lamb*torch.pow(dist,2))
+        # score = mass + self.lamb*dist
+        score = torch.clamp(score, max=10, min=-10)
+        score = -F.logsigmoid(score)
+
+        #dist = torch.sum(torch.pow(emb_u.unsqueeze(1).repeat(1, 5, 1)-emb_neg_v, 2), dim=2)
+        dist = torch.bmm(emb_neg_v, emb_u.unsqueeze(2)).squeeze()
+        #neg_score = mass.repeat(1, 5) * torch.squeeze(mass_neg_v) - self.lamb*torch.log(dist)
+        # neg_score = mass.repeat(1, 5) * torch.squeeze(mass_neg_v) / (self.lamb*torch.pow(dist,2))
+        # neg_score = mass.repeat(1, 5) * torch.squeeze(mass_neg_v) + self.lamb*dist
+        # neg_score = mass.repeat(1, 5)  + self.lamb*dist
+        #neg_score = torch.clamp(neg_score, max=10, min=-10)
+        #neg_score = -torch.sum(F.logsigmoid(-neg_score), dim=1)
+        
+        return torch.mean(score + neg_score)
+
+    def save_embedding(self, id2word, file_name):
+        embedding = self.u_embeddings.weight.cpu().data.numpy()
+        with open(file_name, 'w') as f:
+            f.write('%d %d\n' % (len(id2word), self.emb_dimension))
+            for wid, w in id2word.items():
+                e = ' '.join(map(lambda x: str(x), embedding[wid]))
+                f.write('%s %s\n' % (w, e))
+
+    def get_embedding(self, id2word):
+        u_embeddings = self.u_embeddings.weight.cpu().data.numpy()
+        embeddings = dict()
+        for wid, w in id2word.items():
+            embeddings[w] = u_embeddings[wid]
+        return embeddings
+
+
+class GravityModel(nn.Module):
+
+    def __init__(self, emb_size, emb_dimension):
+        super(GravityModel, self).__init__()
+        self.emb_size = emb_size
+        self.lamb = 0.1
+        self.emb_dimension = emb_dimension
+        self.u_embeddings = nn.Embedding(emb_size, emb_dimension, sparse=True)
+        self.v_embeddings = nn.Embedding(emb_size, emb_dimension, sparse=True)
+
+        self.mass = nn.Embedding(emb_size, 1, sparse=True)
+
+        initrange = 1.0 / self.emb_dimension
+        init.uniform_(self.u_embeddings.weight.data, -initrange, initrange)
+        init.constant_(self.v_embeddings.weight.data, 0)
+        # init.uniform_(self.v_embeddings.weight.data, -initrange, initrange)
+        # init.uniform_(self.mass.weight.data, -initrange, initrange)
+        init.constant_(self.mass.weight.data, 1)
+        
+    def forward(self, pos_u, pos_v, neg_v):
+        emb_u = self.u_embeddings(pos_u)
+        emb_v = self.v_embeddings(pos_v)
+        emb_neg_v = self.v_embeddings(neg_v)
+        mass = self.mass(pos_u)
+        mass_v = self.mass(pos_v)
+        mass_neg_v = self.mass(neg_v)
+        
+        # score = torch.sum(torch.mul(emb_u, emb_v), dim=1)
+        # score = torch.clamp(score, max=10, min=-10)
+        # score = -F.logsigmoid(score)
+
+        # neg_score = torch.bmm(emb_neg_v, emb_u.unsqueeze(2)).squeeze()
+        # neg_score = torch.clamp(neg_score, max=10, min=-10)
+        # neg_score = -torch.sum(F.logsigmoid(-neg_score), dim=1)
+
+        dist = torch.sum(torch.pow(emb_u-emb_v, 2), dim=1)
+        # dist = torch.sum(torch.mul(emb_u, emb_v), dim=1)
+        score = mass*mass_v - self.lamb*torch.log(dist)
+        # score = mass*mass_v / (self.lamb*torch.pow(dist,2))
+        # score = mass + self.lamb*dist
+        score = torch.clamp(score, max=10, min=-10)
+        score = -F.logsigmoid(score)
+
+        dist = torch.sum(torch.pow(emb_u.unsqueeze(1).repeat(1, 5, 1)-emb_neg_v, 2), dim=2)
+        # dist = torch.bmm(emb_neg_v, emb_u.unsqueeze(2)).squeeze()
+        neg_score = mass.repeat(1, 5) * torch.squeeze(mass_neg_v) - self.lamb*torch.log(dist)
+        # neg_score = mass.repeat(1, 5) * torch.squeeze(mass_neg_v) / (self.lamb*torch.pow(dist,2))
+        # neg_score = mass.repeat(1, 5) * torch.squeeze(mass_neg_v) + self.lamb*dist
+        # neg_score = mass.repeat(1, 5)  + self.lamb*dist
+        neg_score = torch.clamp(neg_score, max=10, min=-10)
+        neg_score = -torch.sum(F.logsigmoid(-neg_score), dim=1)
+        
+        return torch.mean(score + neg_score)
+
+    def save_embedding(self, id2word, file_name):
+        embedding = self.u_embeddings.weight.cpu().data.numpy()
+        with open(file_name, 'w') as f:
+            f.write('%d %d\n' % (len(id2word), self.emb_dimension))
+            for wid, w in id2word.items():
+                e = ' '.join(map(lambda x: str(x), embedding[wid]))
+                f.write('%s %s\n' % (w, e))
+
+    def get_embedding(self, id2word):
+        u_embeddings = self.u_embeddings.weight.cpu().data.numpy()
+        embeddings = dict()
+        for wid, w in id2word.items():
+            embeddings[w] = u_embeddings[wid]
+        return embeddings
+
+    # def get_mass(self):
+    #     return self.mass.weight.cpu().data.numpy()
+    
+    def get_mass(self,id2word):
+        mass = self.mass.weight.cpu().data.numpy()
+        masses = dict()
+        for wid, w in id2word.items():
+            masses[w] = mass[wid]
+        return masses
+        # return self.mass.weight.cpu().data.numpy()    
+
+
+class TrainDeepwalkModel():
+   
+    # from model_one_mass_vector import SkipGramModel
+
+    def __init__(self,EMB_DIM,EPOCHS):
+        super(TrainDeepwalkModel, self).__init__()
+        self.edges = []
+        self.EMB_DIM = EMB_DIM
+        self.EPOCHS = EPOCHS
+
+        self.path_to_graph = "./results/graph.pkl"
+        self.path_node2idx = "./results/node2idx.pkl"
+        self.path_edges = "./results/edges.pkl"
+
+        #self.construct_msi_dataset_to_pg()
+        
+        self.main()
+  
+
+    def construct_msi_dataset_to_pg(self):
+        '''
+        Construct pytorch geometric dataset Data from msi.
+        '''
+        msi = MSI()
+        msi.load()
+
+        with open(self.path_to_graph, 'rb') as handle:
+            G = pickle.load(handle)
+
+        with open(self.path_node2idx, 'rb') as handle:
+            node2idx = pickle.load(handle)
+    
+    
+        start_node_list = []
+        end_node_list = []
+        for edge in graph.edges:
+                start_node_list.append(node2idx[edge[0]])
+                end_node_list.append(node2idx[edge[1]])
+        self.edges = torch.tensor([start_node_list,end_node_list])        
+        
+        output_file = open(self.path_edges,"wb")
+        pickle.dump(self.edges,output_file)
+        output_file.close()
+
+
+    def random_walk(self,G, node, walk_length):
+        walk = [node]
+        for i in range(walk_length):
+            neighbors =  list(G.neighbors(walk[i]))
+            walk.append(np.random.choice(neighbors))
+
+        walk = [str(node) for node in walk]
+        return walk
+
+    def generate_walks(self,G, num_walks, walk_length):
+        walks = []
+        for i in range(num_walks):
+            nodes = G.nodes()
+            nodes = np.random.permutation(nodes)
+            for j in range(nodes.shape[0]):
+                walk = self.random_walk(G, nodes[j], walk_length)
+                walks.append(walk)
+
+        return walks
+
+    def main(self):
+        # Loads the graph
+        msi = MSI()
+        msi.load()
+
+        with open(self.path_to_graph, 'rb') as handle:
+            G = pickle.load(handle)
+
+        #G = nx.read_weighted_edgelist('web_sample.edgelist', delimiter=' ', create_using=nx.Graph())
+        #G = nx.read_edgelist('karate.edgelist', delimiter=' ', nodetype=int, create_using=nx.Graph())
+        
+        print("Number of nodes:", G.number_of_nodes())
+        print("Number of edges:", G.number_of_edges())
+        n = G.number_of_nodes()
+
+        num_walks = 1
+        walk_length = 2
+        walks = self.generate_walks(G, num_walks=num_walks, walk_length=walk_length)
+        print('Generated walks')
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        data = DataReader(walks, min_count=0)
+        dataset = Word2vecDataset(walks, data, window_size=4)
+        dataloader = DataLoader(dataset, batch_size=4, shuffle=True, num_workers=0, collate_fn=dataset.collate)
+
+        emb_size = len(data.word2id)
+        emb_dimension = self.EMB_DIM
+        epochs = self.EPOCHS
+        initial_lr=0.025
+
+        skipgram_model = DeepwalkModel(emb_size, emb_dimension).to(device)
+        optimizer = optim.SparseAdam(list(skipgram_model.parameters()), lr=initial_lr)
+        #optimizer = optim.Adam(skipgram_model.parameters(), lr=initial_lr)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, len(dataloader))
+
+        for epoch in range(epochs):
+
+            print("\n\n\nIteration: " + str(epoch + 1))
+
+            loss_all = 0.0
+            count = 0
+            for i, sample_batched in enumerate(tqdm(dataloader)):
+
+                if len(sample_batched[0]) > 1:
+                    pos_u = sample_batched[0].to(device)
+                    pos_v = sample_batched[1].to(device)
+                    neg_v = sample_batched[2].to(device)
+                    
+                    optimizer.zero_grad()
+                    loss = skipgram_model(pos_u, pos_v, neg_v)
+                    loss.backward()
+                    optimizer.step()
+
+                    scheduler.step()
+
+                    #running_loss = running_loss * 0.9 + loss.item() * 0.1
+                    #print(" Loss: " + str(running_loss))
+                    #print(" Loss: " +loss.item())
+                    loss_all += loss.item()
+                    count += len(sample_batched[0])
+            print("Loss:", loss/count)
+
+        #self.skip_gram_model.save_embedding(self.data.id2word, self.output_file_name)
+        embeddings = skipgram_model.get_embedding(data.id2word)
+
+        E = np.zeros((n,emb_dimension))
+        for i,node in enumerate(G.nodes()):
+            E[i,:] = embeddings[str(node)]
+            
+         
+        node_embeddings = np.array(embeddings)
+       
+
+        #fix embeddings
+        a = node_embeddings.item()
+        
+        new_embeddings = np.empty((len(a),emb_dimension))
+         
+        path_node2idx = "./results/node2idx.pkl"
+        with open(path_node2idx, 'rb') as handle:
+            node2idx = pickle.load(handle)
+        
+        for idx,(key,value) in enumerate(a.items()):
+            new_embeddings[node2idx[key]] = value
+ 
+ 
+            
+        new_embeddings = new_embeddings.astype(np.float32)
+
+        with open(f'./data/deepwalk_embeddings_{emb_dimension}_{epochs}_{walk_length}_{num_walks}.pickle', 'wb') as handle:
+            pickle.dump(new_embeddings, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+     
+
+
+class TrainGravityModel():
+   
+    # from model_one_mass_vector import SkipGramModel
+
+    def __init__(self,EMB_DIM,EPOCHS):
+        super(TrainGravityModel, self).__init__()
+        self.edges = []
+        self.EMB_DIM = EMB_DIM
+        self.EPOCHS = EPOCHS
+
+        self.path_to_graph = "./results/graph.pkl"
+        self.path_node2idx = "./results/node2idx.pkl"
+        self.path_edges = "./results/edges.pkl"
+
+        #self.construct_msi_dataset_to_pg()
+        
+        self.main()
+  
+
+    def construct_msi_dataset_to_pg(self):
+        '''
+        Construct pytorch geometric dataset Data from msi.
+        '''
+        msi = MSI()
+        msi.load()
+
+        with open(self.path_to_graph, 'rb') as handle:
+            G = pickle.load(handle)
+
+        with open(self.path_node2idx, 'rb') as handle:
+            node2idx = pickle.load(handle)
+    
+    
+        start_node_list = []
+        end_node_list = []
+        for edge in graph.edges:
+                start_node_list.append(node2idx[edge[0]])
+                end_node_list.append(node2idx[edge[1]])
+        self.edges = torch.tensor([start_node_list,end_node_list])        
+        
+        output_file = open(self.path_edges,"wb")
+        pickle.dump(self.edges,output_file)
+        output_file.close()
+
+
+    def random_walk(self,G, node, walk_length):
+        walk = [node]
+        for i in range(walk_length):
+            neighbors =  list(G.neighbors(walk[i]))
+            walk.append(np.random.choice(neighbors))
+
+        walk = [str(node) for node in walk]
+        return walk
+
+    def generate_walks(self,G, num_walks, walk_length):
+        walks = []
+        for i in range(num_walks):
+            nodes = G.nodes()
+            nodes = np.random.permutation(nodes)
+            for j in range(nodes.shape[0]):
+                walk = self.random_walk(G, nodes[j], walk_length)
+                walks.append(walk)
+
+        return walks
+
+    def main(self):
+        # Loads the graph
+        msi = MSI()
+        msi.load()
+
+        with open(self.path_to_graph, 'rb') as handle:
+            G = pickle.load(handle)
+
+        #G = nx.read_weighted_edgelist('web_sample.edgelist', delimiter=' ', create_using=nx.Graph())
+        #G = nx.read_edgelist('karate.edgelist', delimiter=' ', nodetype=int, create_using=nx.Graph())
+        
+        print("Number of nodes:", G.number_of_nodes())
+        print("Number of edges:", G.number_of_edges())
+        n = G.number_of_nodes()
+
+        num_walks = 1
+        walk_length = 2
+        walks = self.generate_walks(G, num_walks=num_walks, walk_length=walk_length)
+        print('Generated walks')
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        data = DataReader(walks, min_count=0)
+        dataset = Word2vecDataset(walks, data, window_size=4)
+        dataloader = DataLoader(dataset, batch_size=4, shuffle=True, num_workers=0, collate_fn=dataset.collate)
+
+        emb_size = len(data.word2id)
+        emb_dimension = self.EMB_DIM
+        epochs = self.EPOCHS
+        initial_lr=0.025
+
+        skipgram_model = GravityModel(emb_size, emb_dimension).to(device)
+        optimizer = optim.SparseAdam(list(skipgram_model.parameters()), lr=initial_lr)
+        #optimizer = optim.Adam(skipgram_model.parameters(), lr=initial_lr)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, len(dataloader))
+
+        for epoch in range(epochs):
+
+            print("\n\n\nIteration: " + str(epoch + 1))
+
+            loss_all = 0.0
+            count = 0
+            for i, sample_batched in enumerate(tqdm(dataloader)):
+
+                if len(sample_batched[0]) > 1:
+                    pos_u = sample_batched[0].to(device)
+                    pos_v = sample_batched[1].to(device)
+                    neg_v = sample_batched[2].to(device)
+                    
+                    optimizer.zero_grad()
+                    loss = skipgram_model(pos_u, pos_v, neg_v)
+                    loss.backward()
+                    optimizer.step()
+
+                    scheduler.step()
+
+                    #running_loss = running_loss * 0.9 + loss.item() * 0.1
+                    #print(" Loss: " + str(running_loss))
+                    #print(" Loss: " +loss.item())
+                    loss_all += loss.item()
+                    count += len(sample_batched[0])
+            print("Loss:", loss/count)
+
+        #self.skip_gram_model.save_embedding(self.data.id2word, self.output_file_name)
+        embeddings = skipgram_model.get_embedding(data.id2word)
+
+        E = np.zeros((n,emb_dimension))
+        for i,node in enumerate(G.nodes()):
+            E[i,:] = embeddings[str(node)]
+            
+        #READOUT masses:
+        mass = skipgram_model.get_mass(data.id2word)
+        masses = np.zeros((n,1))
+        for i,node in enumerate(G.nodes()):
+            masses[i] = mass[str(node)]
+        
+        node_embeddings = np.array(embeddings)
+       
+
+        #fix embeddings
+        a = node_embeddings.item()
+        
+        new_embeddings = np.empty((len(a),emb_dimension))
+        new_masses = np.empty((len(masses),len(masses[0])))
+        
+        path_node2idx = "./results/node2idx.pkl"
+        with open(path_node2idx, 'rb') as handle:
+            node2idx = pickle.load(handle)
+        
+        for idx,(key,value) in enumerate(a.items()):
+            new_embeddings[node2idx[key]] = value
+            new_masses[node2idx[key]] = masses[idx]
+
+ 
+            
+        new_embeddings = new_embeddings.astype(np.float32)
+
+        with open(f'./data/gravity_embeddings_{emb_dimension}_{epochs}_{walk_length}_{num_walks}.pickle', 'wb') as handle:
+            pickle.dump(new_embeddings, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+        with open(f'./data/gravity_masses_{emb_dimension}_{epochs}_{walk_length}_{num_walks}.pickle', 'wb') as handle:
+            pickle.dump(new_masses, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
 class ModelNode2Vec():
 
@@ -264,7 +768,6 @@ class Dataset_Mlp(Dataset):
             with open(self.node_embeddings_path, 'rb') as handle:
                 node_embeddings = pickle.load(handle)
 
-
         path_to_graph = "./results/graph.pkl"
         path_node2idx = "./results/node2idx.pkl"
 
@@ -287,6 +790,8 @@ class Dataset_Mlp(Dataset):
             drug_to_disease_dict = pickle.load(handle)
 
         
+ 
+
         #five cross validation
         #result_indices = self.kfold_split(pairs=drug_to_disease_dict, perc=0.2, shuffle=True)  # [ ([key1train,key2train,..],[ktest,ktest2]) fold1 , 
         with open('./data/results_indices.pickle','rb') as handle:
@@ -323,7 +828,7 @@ class Dataset_Mlp(Dataset):
             for disease in disease_to_drug_dict:
                 counter = 0
                 #40
-                while(counter<3):
+                while(counter<40):
                     positive = False
                     random_key = random.choice(list(drug_codes_dict.keys()))
                     approved_drugs = disease_to_drug_dict[disease]
@@ -336,11 +841,10 @@ class Dataset_Mlp(Dataset):
                         else:
                             X_negative_codes_test.append([random_key,disease])
                         counter+=1 
-            
             for drug in drug_to_disease_dict:
                 counter = 0
                 #3
-                while(counter<2):
+                while(counter<3):
                     positive = False
                     #generate random disease code
                     random_key = random.choice(list(disease_codes_dict.keys()))
@@ -357,6 +861,7 @@ class Dataset_Mlp(Dataset):
                             X_negative_codes_test.append([drug,random_key])
                         counter+= 1
             
+            
             print("Negative examples generated")
             #print(len(X_negative_codes)) # this should close to len(X_positive_codes)
             # construct X_input. 
@@ -366,12 +871,15 @@ class Dataset_Mlp(Dataset):
             X_negative_train = []
             X_positive_test = []
             X_negative_test = []
-    
+
+            #node_embeddings = node_embeddings.item()
+            
             for sample in X_positive_codes_train:
                 if(self.node_embeddings_model=="diffusion_profiles"):
                     a = torch.tensor(node_embeddings[sample[0]],dtype=torch.float)
                     b = torch.tensor(node_embeddings[sample[1]],dtype=torch.float)
                 else:
+                    
                     a = torch.tensor(node_embeddings[node2idx[sample[0]]]) 
                     b = torch.tensor(node_embeddings[node2idx[sample[1]]])
                 X_positive_train.append(torch.stack([a,b]))
@@ -415,8 +923,10 @@ class Dataset_Mlp(Dataset):
 
             print("Train",len(X_positive_train),len(X_negative_train))
             print("Test",len(X_positive_test),len(X_negative_test))
+            
+           
             if(self.downstream_model == "gnn"):
-                res = train_GNN(X_positive_codes_train,X_negative_codes_train,X_negative_codes_train,X_negative_codes_test,
+                res = train_GNN(X_positive_codes_train,X_negative_codes_train,X_positive_codes_test,X_negative_codes_test,
                                                                                                     node_embeddings,
                                                                                                     indices,
                                                                                                     self.node_embeddings_path, 
@@ -425,7 +935,7 @@ class Dataset_Mlp(Dataset):
                                                                                                     self.downstream_model,
                                                                                                     self.mlp_model,
                                                                                                     self.mlp_epochs)
-            else: 
+            elif(self.downstream_model == "mlp" or self.downstream_model == "no"): 
                 res = train_MLP(torch.stack((X_train)), torch.stack((X_test)), y_train, y_test, indices,
                                                                                                     self.node_embeddings_path,
                                                                                                     self.EMB_DIM,
@@ -434,6 +944,17 @@ class Dataset_Mlp(Dataset):
                                                                                                     self.mlp_model,
                                                                                                     self.mlp_epochs
                                                                                                     )
+
+            elif(self.downstream_model == "svm" or self.downstream_model == "rf" or self.downstream_model == "ada"):
+                res = train_sklearn_classifiers(torch.stack((X_train)), torch.stack((X_test)), y_train, y_test, indices,
+                                                                                                    self.node_embeddings_path,
+                                                                                                    self.EMB_DIM,
+                                                                                                    self.node_embeddings_model,
+                                                                                                    self.downstream_model,
+                                                                                                    self.mlp_model,
+                                                                                                    self.mlp_epochs
+                                                                                                    )                                                                                                   
+                                                                                                
             mean_average_precision.append(res[0])
             average_recall50.append(res[1])
             median_rocauc.append(res[2])
@@ -448,6 +969,41 @@ class Dataset_Mlp(Dataset):
         print("Median rocauc", final_roc)
         with open('./data/results.txt','a') as handle:
             handle.write(f'{self.node_embeddings_path} {self.node_embeddings_model} {self.downstream_model} {self.mlp_model}_{self.mlp_epochs} {final_ap} {final_ar} {final_roc}\n')
+
+
+def train_sklearn_classifiers(X_train,X_test,y_train,y_test,indices,node_embeddings_path,EMB_DIM,node_embeddings_model,downstream_model,mlp_model,mlp_epochs):
+    from evaluate import evaluate_model
+    from evaluate import construct_disease_drug_tsv
+
+
+    dataset_train = np.reshape(X_train,(-1,2*X_train.shape[-1]))
+    dataset_test =  np.reshape(X_test,(-1,2*X_test.shape[-1]))
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    #forward loop
+    losses = []
+    accur = []
+    losses_test = []
+    accur_test = []
+
+
+    #model = svm.SVC(probability=True)
+    #model = RandomForestClassifier(random_state=0)
+    #model = AdaBoostClassifier()
+    model = KNeighborsClassifier(n_neighbors=5)
+
+    model.fit(dataset_train,y_train)
+
+    #torch.save(model.state_dict(), "./data/rf_model_"+str(EMB_DIM))
+    construct_disease_drug_tsv()
+    return evaluate_model(  model=node_embeddings_model, 
+                            downstream_model=downstream_model, 
+                            mlp_model_name=model,
+                            node_embeddings_path=node_embeddings_path,
+                            EMB_DIM=EMB_DIM, 
+                            indices=indices
+                            )
+
 
 def train_MLP(X_train,X_test,y_train,y_test,indices,node_embeddings_path,EMB_DIM,node_embeddings_model,downstream_model,mlp_model,mlp_epochs):
     from evaluate import evaluate_model
@@ -526,28 +1082,50 @@ class GNN(torch.nn.Module):
     GNN for node pair classification. It propagates the graph, and predicts if a certain disease treat a certain drug. (like the MLP above)
     Experiments with and without node features
     '''
-    def __init__(self,node_features,edge_index,num_features,final_node_dimensions):
+    def __init__(self,node_features,edge_index,num_features,final_node_dimensions,gnn_embeddings_path, evaluation=False):
         super(GNN, self).__init__()
-        self.conv1 = GCNConv(num_features, num_features)
-        self.conv2 = GCNConv(num_features, 64)
-        self.conv3 = GCNConv(64, final_node_dimensions)
-        self.linear = nn.Linear(final_node_dimensions,1)
+        self.conv1 = GATConv(num_features ,32 , heads=8)
+        self.conv2 = GATConv(32*8, 32, heads=8, concat=False)
+        self.conv3 = GATConv(32, 32)
+
+        self.linear = nn.Linear(64,1)
+
         self.relu = nn.ReLU()
         self.dropout = nn.Dropout(p=0.2)
         self.node_features = node_features
         self.edge_index = edge_index
-        
-    def forward(self,pair_index):
-        x = self.relu(self.conv1(self.node_features, self.edge_index))
-        x = self.dropout(x)
-        x = self.relu(self.conv2(x,self.edge_index))
-        x = self.dropout(x)
-        x = self.conv3(x, self.edge_index)
+        self.gnn_embeddings_path = gnn_embeddings_path
+        if(evaluation == True) :
+            self.gnn_embeddings = self.load_gnn_embeddings()
+
+    def forward(self, pair_index, save_gnn_embeddings_bool=False, evaluation=False):
+        if(evaluation == False):
+            x = self.dropout(self.relu(self.conv1(self.node_features, self.edge_index)))
+            x = self.dropout(self.relu(self.conv2(x,self.edge_index)))
+            x = self.dropout(self.relu(self.conv3(x,self.edge_index)))
+
+            if(save_gnn_embeddings_bool == True):
+                self.save_gnn_embeddings(x)
+        else:
+            x = self.gnn_embeddings
         #compute the pair representation
-        pair_repr = torch.mul(x[pair_index[:,0]],x[pair_index[:,1]])
+        #aggregators:
+        #1) multiply
+        #pair_repr = torch.mul(x[pair_index[:,0]],x[pair_index[:,1]])
+        #2) concat
+        pair_repr = torch.cat((x[pair_index[:,0]],x[pair_index[:,1]]),dim=-1)
+        #3) difference
+        #pair_repr = torch.sub(x[pair_index[:,0]], x[pair_index[:,1]])
         x = self.linear(pair_repr)
         return torch.sigmoid(x)
 
+    def save_gnn_embeddings(self,x):
+        with open(self.gnn_embeddings_path, "wb") as handle:
+            pickle.dump(x,handle,protocol=pickle.HIGHEST_PROTOCOL)
+
+    def load_gnn_embeddings(self):
+        with open(self.gnn_embeddings_path, "rb") as handle:
+            return pickle.load(handle)
 
 class Dataset_GNN():
     def __init__(self,node_embeddings={}):
@@ -657,14 +1235,18 @@ def train_GNN(X_positive_codes_train,X_negative_codes_train,X_positive_codes_tes
     dataset_test = TensorDataset(torch.stack(X_test),y_test.type(torch.FloatTensor))
 
     #DataLoader
-    trainloader = DataLoader(dataset_train,batch_size=16,shuffle=True)
-    testloader = DataLoader(dataset_test,batch_size=16,shuffle=True)
+    trainloader = DataLoader(dataset_train,batch_size=128,shuffle=True)
+    testloader = DataLoader(dataset_test,batch_size=128,shuffle=True)
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    gnn_embeddings_path = "./data/gnn_embeddings.pickle"
     model = GNN(node_features = dataset_gnn.data.x.to(device),
                 edge_index = dataset_gnn.data.edge_index.to(device),
                 num_features = dataset_gnn.num_features,
-                final_node_dimensions = 64).to(device)
+                final_node_dimensions = 64,
+                gnn_embeddings_path = gnn_embeddings_path
+                ).to(device)
+
     criterion = nn.BCELoss()
     optimizer = torch.optim.Adam(model.parameters(), lr=0.01)
 
@@ -714,6 +1296,9 @@ def train_GNN(X_positive_codes_train,X_negative_codes_train,X_positive_codes_tes
             print("Test: epoch {}\tloss : {}\t accuracy : {}".format(i,np.mean(losses_test[n_batches_test*i:n_batches_test*(i+1)]),np.mean(accur_test[n_batches_test*i:n_batches_test*(i+1)])))         
         torch.save(model.state_dict(), "./data/GNN_model_"+str(EMB_DIM))  
     construct_disease_drug_tsv()
+    model.eval()
+    sample_x, _ = iter(trainloader).next()
+    model(sample_x.to(device),save_gnn_embeddings_bool=True) #save gnn_embeddings for fast evaluation
     return evaluate_model( model=node_embeddings_model, 
                             downstream_model=downstream_model, 
                             mlp_model_name=mlp_model,
@@ -723,20 +1308,11 @@ def train_GNN(X_positive_codes_train,X_negative_codes_train,X_positive_codes_tes
                             gnn_params = { "node_features" : dataset_gnn.data.x,
                                         "edge_index" : dataset_gnn.data.edge_index,
                                         "num_features" : dataset_gnn.num_features,
-                                        "final_node_dimensions" : 64
-                                        }
+                                        "final_node_dimensions" : 64,
+                                        "gnn_embeddings_path" : gnn_embeddings_path
+                                        } 
                             )
     
-
-
-
-
-
-
-
-
-
-
     
 class ModelMetaPath2Vec():
     "NEED FIX"
@@ -768,6 +1344,7 @@ class ModelMetaPath2Vec():
             self.node2idx = pickle.load(handle)
         
         
+        '''
         metapath = [
             ('drug', 'to', 'protein'),
             ('protein', 'to', 'protein'),
@@ -780,44 +1357,78 @@ class ModelMetaPath2Vec():
             ('biological_function', 'from', 'protein'),
             ('protein','from','drug')
         ]
+        '''
+        metapaths = [ 
+            ['drug','protein','drug'],
+            ['drug','protein','indication','drug'],
+            ['drug','protein','protein','indication','drug'],
+            ['drug','protein','biological_function','indication','drug'],
+            ['drug','protein','protein','biological_function','indication','drug'],
+            ['indication','protein','indication'],
+            ['indication','protein','drug','indication'],
+            ['indication','protein','protein','drug','indication'],
+            ['indication','protein','biological_function','drug','indication'],
+            ['indication','protein','protein','biological_function','drug','indication'],
+        ]
 
-        edge_index_dict = {}
+        stellar = True
 
-        edge_index_dict[('drug','to','protein')] = self.construct_two_edge_list(list(msi.components["drug_to_protein"].edge_list))
-        edge_index_dict[('indication','to','protein')] = self.construct_two_edge_list(list(msi.components["indication_to_protein"].edge_list))
-        edge_index_dict[('protein','to','protein')] = self.construct_two_edge_list(list(msi.components["protein_to_protein"].edge_list))
-        edge_index_dict[('protein', 'to', 'biological_function')] = self.construct_two_edge_list(list(msi.components["protein_to_biological_function"].edge_list))
-        edge_index_dict[('biological_function', 'to', 'biological_function')] = self.construct_two_edge_list(list(msi.components["biological_function_to_biological_function"].edge_list))
+        g = sg.StellarGraph.from_networkx(self.graph)
 
-        edge_index_dict[('protein','from','drug')] = self.construct_two_edge_list(list(msi.components["drug_to_protein"].edge_list),
-                                                                                  reversed=True)
+        # Create the random walker
+        rw = UniformRandomMetaPathWalk(g)
+        print(g.info())
+        walk_length = 50
+        walks = rw.run(
+            nodes=list(g.nodes()),  # root nodes
+            length=walk_length,  # maximum length of a random walk
+            n=5,  # number of random walks per root node
+            metapaths=metapaths,  # the metapaths
+        )
 
-        edge_index_dict[('protein','from','indication')] = self.construct_two_edge_list(list(msi.components["indication_to_protein"].edge_list),
+
+
+        if(stellar):
+            print(walks)
+            model = Word2Vec(walks, window=5, min_count=0, sg=1, workers=2, epochs=1)
+        else:
+            edge_index_dict = {}
+
+
+            edge_index_dict[('protein','to','protein')] = self.construct_two_edge_list(list(msi.components["protein_to_protein"].edge_list))
+            edge_index_dict[('protein','from','protein')] = self.construct_two_edge_list(list(msi.components["protein_to_protein"].edge_list),
                                                                                         reversed=True)
 
-        edge_index_dict[('protein','from','protein')] = self.construct_two_edge_list(list(msi.components["protein_to_protein"].edge_list),
-                                                                                     reversed=True)
+            edge_index_dict[('drug','to','protein')] = self.construct_two_edge_list(list(msi.components["drug_to_protein"].edge_list))
+            edge_index_dict[('protein','from','drug')] = self.construct_two_edge_list(list(msi.components["drug_to_protein"].edge_list),
+                                                                                    reversed=True)
 
-        edge_index_dict[('biological_function', 'from', 'protein')] = self.construct_two_edge_list(list(msi.components["protein_to_biological_function"].edge_list),
-                                                                                                   reversed=True)
-                                                                                                   
-        edge_index_dict[('biological_function', 'from', 'biological_function')] = self.construct_two_edge_list(list(msi.components["biological_function_to_biological_function"].edge_list),
-                                                                                                               reversed=True)
+            edge_index_dict[('indication','to','protein')] = self.construct_two_edge_list(list(msi.components["indication_to_protein"].edge_list))
+            edge_index_dict[('protein','from','indication')] = self.construct_two_edge_list(list(msi.components["indication_to_protein"].edge_list),
+                                                                                            reversed=True)
 
-        print(edge_index_dict)
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        self.model = MetaPath2Vec(edge_index_dict, embedding_dim=128,
-                            metapath=metapath, walk_length=50, context_size=7,
-                            walks_per_node=5, num_negative_samples=5,
-                            sparse=True).to(device)
 
-        self.loader = self.model.loader(batch_size=2, shuffle=True, num_workers=12)
-        self.optimizer = torch.optim.SparseAdam(list(self.model.parameters()), lr=0.01)
+            edge_index_dict[('protein', 'to', 'biological_function')] = self.construct_two_edge_list(list(msi.components["protein_to_biological_function"].edge_list))
+            edge_index_dict[('biological_function', 'from', 'protein')] = self.construct_two_edge_list(list(msi.components["protein_to_biological_function"].edge_list),
+                                                                                                    reversed=True)
+                                                                                                    
+            edge_index_dict[('biological_function', 'to', 'biological_function')] = self.construct_two_edge_list(list(msi.components["biological_function_to_biological_function"].edge_list))
+            edge_index_dict[('biological_function', 'from', 'biological_function')] = self.construct_two_edge_list(list(msi.components["biological_function_to_biological_function"].edge_list),
+                                                                                                                reversed=True)
 
-        for epoch in range(1, 6):
-            self.train(epoch)
-            #acc = test()
-            #print(f'Epoch: {epoch}, Accuracy: {acc:.4f}')
+            device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+
+            self.loader = self.model.loader(batch_size=2, shuffle=True, num_workers=4)
+            self.optimizer = torch.optim.SparseAdam(list(self.model.parameters()), lr=0.01)
+            print(len(self.loader.dataset))
+            for k,v in edge_index_dict.items():
+                print(v.shape)
+
+            for epoch in range(1, 6):
+                self.train(epoch)
+                #acc = test()
+                #print(f'Epoch: {epoch}, Accuracy: {acc:.4f}')
 
     #construction of edge_index_dict 
     def construct_two_edge_list(self,edge_list,reversed=False):
@@ -1082,11 +1693,9 @@ def test_geometric():
     ]
 
     print(data.edge_index_dict)
-    print(data.keys)
-    print(data.num_nodes_dict)
-    print(data.y_dict)
-    print(data.y_index_dict)
-    exit()
+
+    for k,v in data.edge_index_dict.items():
+        print(v.shape)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model = MetaPath2Vec(data.edge_index_dict, embedding_dim=128,
                         metapath=metapath, walk_length=50, context_size=7,
@@ -1139,24 +1748,48 @@ def test_geometric():
         acc = test()
         print(f'Epoch: {epoch}, Accuracy: {acc:.4f}')
 
+def visualize_graph():
+    import matplotlib.pyplot as plt
+
+    with open("./results/graph.pkl", 'rb') as handle:
+        G = pickle.load(handle)
+
+    with open("./data/gravity_masses_128_50_2_1.pickle","rb") as handle:
+        masses = pickle.load(handle)
+
+    with open( "./results/node2idx.pkl", 'rb') as handle:
+        node2idx = pickle.load(handle)
+
+    res =  list(G.nodes())[:100]
+    #pos = nx.spring_layout(G)  #setting the positions with respect to G, not k.
+    k = G.subgraph(res)  
+    nx.draw_networkx(k, node_color = 'b')
+    plt.savefig("./graph.pdf")
+
 if __name__ == "__main__":
+    #visualize_graph()
 
     #node2vec hyperparams
     EMB_DIM = 128
-    NODE2VEC_EPOCHS = 120
+    NODE2VEC_EPOCHS = 50
     combinations = [[20,10,10,1,1,1],[20,10,10,5,1,1],[20,10,10,10,1,1],[30,10,10,1,1,1]]  
     #Train node2vec    
     #ModelNode2Vec(EMB_DIM,NODE2VEC_EPOCHS)
-    
+    #TrainGravityModel(EMB_DIM,NODE2VEC_EPOCHS)
+    #TrainDeepwalkModel(EMB_DIM,NODE2VEC_EPOCHS)
+
+    #exit()
     for combination in combinations:
         #datasetAutoencoder = DatasetAutoencoder(EMB_DIM,NODE2VEC_EPOCHS) #train graph autoencoder
         #configuration
         #EMB_DIM = 29959 # Diffusion profile
         MLP_MODEL = "MLP" 
-        downstream_model= "mlp"  #use mlp or no
-        MLP_EPOCHS = 40
+        downstream_model= "ada"  #use mlp or no
+        MLP_EPOCHS = 25
         NODE_EMBEDDINGS_MODEL = "node2vec" 
-        NODE_EMBEDDINGS_PATH = f'./data/node2vec_embeddings_{EMB_DIM}_{NODE2VEC_EPOCHS}_{str(combination[0])}_{str(combination[1])}_{str(combination[2])}_{str(combination[3])}_{str(combination[4])}_{str(combination[5])}.pickle'
+        #NODE_EMBEDDINGS_PATH = f'./data/node2vec_embeddings_{EMB_DIM}_{NODE2VEC_EPOCHS}_{str(combination[0])}_{str(combination[1])}_{str(combination[2])}_{str(combination[3])}_{str(combination[4])}_{str(combination[5])}.pickle'
+        NODE_EMBEDDINGS_PATH = f'./data/gravity_embeddings_{EMB_DIM}_{NODE2VEC_EPOCHS}_2_1.pickle'
+        #NODE_EMBEDDINGS_PATH = f'./data/deepwalk_embeddings_{EMB_DIM}_{NODE2VEC_EPOCHS}_2_1.pickle'
 
         
         #mlp_model = "MLPSetBilnear"
