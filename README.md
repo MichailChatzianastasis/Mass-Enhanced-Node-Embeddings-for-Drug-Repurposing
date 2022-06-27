@@ -3,7 +3,7 @@
 [![made-with-python](https://img.shields.io/badge/Made%20with-Python-red.svg)](#python)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) 
 
-Official Implementation for the paper <strong> Mass Enhanced Node Embeddings for Drug Repurposing </strong>.
+Official Implementation for the paper <strong> <a href="https://www.biorxiv.org/content/10.1101/2022.06.22.497214v1"> Mass Enhanced Node Embeddings for Drug Repurposing.
 
 ## Abstract 
 Graph representation learning has recently emerged as a promising approach to solve pharmacological tasks by modeling biological
